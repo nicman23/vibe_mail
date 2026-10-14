@@ -1,5 +1,5 @@
 #!/bin/sh
-# On the host: `./setup.sh` asks for the settings, writes .env and starts the stack.
+# On the host: `./setup.sh` asks for the settings, writes .env, sets up weekly updates (cron) and starts the stack.
 # In the setup container (`setup.sh apply`, run by compose on every `up`, idempotent):
 # creates the mailbox + DKIM keys, publishes A/MX/SPF/DKIM/DMARC to Cloudflare, writes openwrt-firewall.conf.
 set -eu
@@ -27,6 +27,9 @@ if [ "${1:-}" != apply ]; then
   def=Y; grep -q '^COMPOSE_PROFILES=$' .env 2>/dev/null && def=n
   printf 'Include Roundcube webmail? (y/n) [%s]: ' "$def"; read -r v
   case ${v:-$def} in [Nn]*) PROFILES= ;; *) PROFILES=webmail ;; esac
+  def=Y; [ "$(get AUTO_UPDATE)" = no ] && def=n
+  printf 'Update images automatically every Monday 04:00? (y/n) [%s]: ' "$def"; read -r v
+  case ${v:-$def} in [Nn]*) AUTO_UPDATE=no ;; *) AUTO_UPDATE=yes ;; esac
   (umask 077; cat > .env <<EOF
 # Written by ./setup.sh (re-run it to change), or edit by hand and run: docker compose up -d
 MAIL_HOST=$MAIL_HOST
@@ -36,9 +39,23 @@ CF_API_TOKEN='$CF_API_TOKEN'
 ACME_EMAIL=$ACME_EMAIL
 # Optional services: "webmail" = Roundcube + Caddy, empty = mail server only
 COMPOSE_PROFILES=$PROFILES
+# Weekly cron job: pull newer images and recreate changed containers (log: docker-data/update.log)
+AUTO_UPDATE=$AUTO_UPDATE
 EOF
   )
-  echo "Wrote .env, starting the stack..."
+  echo "Wrote .env"
+
+  # Add/remove this project's weekly update job in the current user's crontab
+  TAG="# vibe_mail auto-update $PWD"
+  if command -v crontab >/dev/null; then
+    { crontab -l 2>/dev/null | grep -vF "$TAG" || true
+      [ "$AUTO_UPDATE" = no ] || echo "0 4 * * 1 cd '$PWD' && { docker compose pull -q && docker compose up -d && docker image prune -f; } >> docker-data/update.log 2>&1 $TAG"
+    } | crontab -
+    echo "Weekly updates: $AUTO_UPDATE"
+  elif [ "$AUTO_UPDATE" = yes ]; then
+    echo "crontab not found: install cron (e.g. apt install cron) and re-run to enable weekly updates" >&2
+  fi
+  echo "Starting the stack..."
   # Turning webmail off doesn't stop already-running webmail containers by itself
   [ -n "$PROFILES" ] || docker compose rm -sf roundcube caddy
   exec docker compose up -d
