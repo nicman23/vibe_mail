@@ -1,0 +1,43 @@
+#!/bin/bash
+# Interactive menu to manage mail users and aliases. Run: ./mailctl
+set -u
+cd "$(dirname "$0")"
+dms() { docker compose exec mailserver setup "$@"; }
+MAIN_USER=$(sed -n 's/^MAIL_USER=//p' .env)
+DOMAIN=${MAIN_USER#*@}
+
+# Accepts "maria" or "maria@domain"
+ask_email() {
+	read -rp "$1: " e
+	[ -n "$e" ] || return 1
+	[[ $e == *@* ]] || e=$e@$DOMAIN
+	echo "$e"
+}
+
+while true; do
+	echo
+	echo "Mail users ($DOMAIN)"
+	echo "  1) List users and aliases"
+	echo "  2) Add user"
+	echo "  3) Change password"
+	echo "  4) Delete user"
+	echo "  5) Add alias (forward)"
+	echo "  6) Remove alias"
+	echo "  q) Quit"
+	read -rp "> " choice
+	case $choice in
+		1) dms email list; echo; dms alias list ;;
+		2) u=$(ask_email "New user") && dms email add "$u" ;;
+		3) u=$(ask_email "User") || continue
+			if [ "$u" = "$MAIN_USER" ]; then
+				echo "$u is MAIL_USER: change MAIL_PASSWORD in .env and run 'docker compose up -d'."
+			else
+				dms email update "$u"
+			fi ;;
+		4) u=$(ask_email "User to delete") && dms email del "$u" ;;
+		5) from=$(ask_email "Forward from (e.g. info)") && to=$(ask_email "To") && dms alias add "$from" "$to" ;;
+		6) from=$(ask_email "Alias") && to=$(ask_email "Target") && dms alias del "$from" "$to" ;;
+		q|Q|"") exit 0 ;;
+		*) echo "Pick 1-6 or q" ;;
+	esac
+done

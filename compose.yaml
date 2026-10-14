@@ -1,0 +1,111 @@
+# Postfix + Dovecot (docker-mailserver), Roundcube webmail (LAN only), certbot with Cloudflare DNS-01 certs.
+# All state lives in ./docker-data — to move hosts: stop, copy this dir, `docker compose up -d`, update DNS.
+# Everything is configured in .env; `docker compose up -d` does the rest.
+
+services:
+  setup:
+    image: alpine:3
+    command: sh /project/setup.sh apply
+    env_file: .env
+    network_mode: host # sees the host's real LAN/public addresses (for IP detection + openwrt-firewall.conf)
+    volumes:
+      - .:/project
+
+  # Cert for MAIL_HOST (mail server + webmail). Checked via Cloudflare DNS, so no inbound port needed.
+  certbot:
+    image: certbot/dns-cloudflare
+    restart: always
+    depends_on:
+      setup:
+        condition: service_completed_successfully # writes the Cloudflare credentials file
+    entrypoint: sh -c
+    command:
+      - >
+        certbot certonly --non-interactive --keep-until-expiring --agree-tos
+        --email ${ACME_EMAIL:-${MAIL_USER}} --key-type rsa
+        --dns-cloudflare --dns-cloudflare-credentials /certbot/cf.ini
+        --cert-name ${MAIL_HOST:?set MAIL_HOST in .env} -d ${MAIL_HOST}
+        && while sleep 43200; do certbot renew -q; done
+    volumes:
+      - ./docker-data/letsencrypt:/etc/letsencrypt
+      - ./docker-data/certbot:/certbot:ro
+    # Mail server and webmail can't start without a cert, so they wait for this.
+    healthcheck:
+      test: ["CMD", "test", "-f", "/etc/letsencrypt/live/${MAIL_HOST}/fullchain.pem"]
+      interval: 10s
+      start_period: 5m
+
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:16
+    hostname: ${MAIL_HOST}
+    restart: always
+    stop_grace_period: 1m
+    depends_on:
+      certbot:
+        condition: service_healthy
+    ports:
+      - "25:25"    # SMTP (server-to-server)
+      - "465:465"  # submission, implicit TLS
+      - "587:587"  # submission, STARTTLS
+      - "993:993"  # IMAPS
+    environment:
+      # Reads /etc/letsencrypt/live/<hostname>/ and reloads automatically when certbot renews.
+      SSL_TYPE: letsencrypt
+      # Rspamd does spam filtering + DKIM signing + SPF/DMARC checks, replacing the older separate services.
+      ENABLE_RSPAMD: 1
+      ENABLE_OPENDKIM: 0
+      ENABLE_OPENDMARC: 0
+      ENABLE_POLICYD_SPF: 0
+      SPOOF_PROTECTION: 1
+    volumes:
+      - ./docker-data/dms/mail-data/:/var/mail/
+      - ./docker-data/dms/mail-state/:/var/mail-state/
+      - ./docker-data/dms/mail-logs/:/var/log/mail/
+      - ./docker-data/dms/config/:/tmp/docker-mailserver/
+      - ./docker-data/letsencrypt:/etc/letsencrypt:ro
+      - /etc/localtime:/etc/localtime:ro
+    networks:
+      default:
+        # Roundcube reaches the mail server by its real name, so TLS cert checks pass.
+        aliases:
+          - ${MAIL_HOST}
+
+  roundcube:
+    image: roundcube/roundcubemail:latest-apache
+    restart: always
+    depends_on:
+      - mailserver
+    environment:
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${MAIL_HOST}
+      ROUNDCUBEMAIL_DEFAULT_PORT: 993
+      ROUNDCUBEMAIL_SMTP_SERVER: tls://${MAIL_HOST}
+      ROUNDCUBEMAIL_SMTP_PORT: 587
+      ROUNDCUBEMAIL_PLUGINS: archive,zipdownload
+    volumes:
+      - ./docker-data/roundcube/db:/var/roundcube/db
+
+  # HTTPS in front of Roundcube at https://MAIL_HOST. Port 443 is not opened on the router, so it's LAN only.
+  caddy:
+    image: caddy:2
+    restart: always
+    depends_on:
+      certbot:
+        condition: service_healthy
+    ports:
+      - "443:443"
+    environment:
+      MAIL_HOST: ${MAIL_HOST}
+    # ponytail: Caddy doesn't watch cert files, so reload daily to pick up certbot renewals (certs renew 30 days early).
+    entrypoint: sh -c
+    command:
+      - (while sleep 86400; do caddy reload --config /etc/caddy/Caddyfile --force; done) & exec caddy run --config /etc/caddy/Caddyfile
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./docker-data/letsencrypt:/etc/letsencrypt:ro
+      - ./docker-data/caddy:/data
+
+networks:
+  default:
+    # Real client IPv6 addresses reach Postfix (spam/SPF checks need them).
+    enable_ipv6: true

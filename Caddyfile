@@ -1,0 +1,5 @@
+# Webmail, LAN only. Uses certbot's cert instead of Caddy's own ACME.
+{$MAIL_HOST} {
+	tls /etc/letsencrypt/live/{$MAIL_HOST}/fullchain.pem /etc/letsencrypt/live/{$MAIL_HOST}/privkey.pem
+	reverse_proxy roundcube:80
+}

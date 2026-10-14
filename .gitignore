@@ -1,0 +1,5 @@
+# Secrets and per-host state, created by ./setup.sh
+.env
+docker-data/
+openwrt-firewall.conf
+tmp/
