@@ -53,6 +53,7 @@ services:
       SSL_TYPE: letsencrypt
       # Rspamd does spam filtering + DKIM signing + SPF/DMARC checks, replacing the older separate services.
       ENABLE_RSPAMD: 1
+      ENABLE_AMAVIS: 0
       ENABLE_OPENDKIM: 0
       ENABLE_OPENDMARC: 0
       ENABLE_POLICYD_SPF: 0
@@ -72,6 +73,7 @@ services:
 
   roundcube:
     image: roundcube/roundcubemail:latest-apache
+    profiles: [webmail] # optional: enabled by COMPOSE_PROFILES=webmail in .env (./setup.sh asks)
     restart: always
     depends_on:
       - mailserver
@@ -85,9 +87,10 @@ services:
     volumes:
       - ./docker-data/roundcube/db:/var/roundcube/db
 
-  # HTTPS in front of Roundcube at https://MAIL_HOST. Port 443 is not opened on the router, so it's LAN only.
+  # HTTPS in front of Roundcube at https://MAIL_HOST. Port 443 is not opened on the router / ufw, so it's LAN / Tailscale only.
   caddy:
     image: caddy:2
+    profiles: [webmail]
     restart: always
     depends_on:
       certbot:

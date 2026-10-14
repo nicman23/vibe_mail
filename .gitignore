@@ -2,4 +2,5 @@
 .env
 docker-data/
 openwrt-firewall.conf
+inalan-mail.txt
 tmp/
